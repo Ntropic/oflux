@@ -39,18 +39,19 @@ oflux run "a cinematic dragon flying over snowy mountains"
 </p>
 
 Optional options for `run`
-```
-  -m, --model MODEL        Model repo id to use (auto-added if downloaded)
-  -s, --steps N            Inference steps (e.g. 4–12 for previews)
-  -W, --width PX           Image width (default 512)
-  -H, --height PX          Image height (default 512)
-  -g, --guidance G         Guidance scale (default 3.5)
-  -n, --num-images K       Number of images (default 1)
-  -S, --seed N             Seed for reproducibility
-  -o, --outfile PATH       Output file or prefix (if -n>1). If missing will auto generate a name from prompt
-  -O, --outdir DIR         Directory to save images (client side, default .)
-  -p, --preview            Preview inline (Kitty terminal only)
-```
+| Argument        | Description |
+|-----------------|-------------|
+| `-m, --model MODEL`   | Model repo id to use (auto-added if downloaded) |
+| `-s, --steps N`       | Inference steps (e.g. 4–12 for previews) |
+| `-W, --width PX`      | Image width (default 512) |
+| `-H, --height PX`     | Image height (default 512) |
+| `-g, --guidance G`    | Guidance scale (default 3.5) |
+| `-n, --num-images K`  | Number of images (default 1) |
+| `-S, --seed N`        | Seed for reproducibility |
+| `-o, --outfile PATH`  | Output file or prefix (if `-n>1`). If missing will auto-generate a name from prompt |
+| `-O, --outdir DIR`    | Directory to save images (client side, default `.`) |
+| `-p, --preview`       | Preview inline (Kitty terminal only) |
+
 
 #### Other commands:
 
