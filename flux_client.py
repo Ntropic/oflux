@@ -4,6 +4,8 @@ import sys
 import json
 import argparse
 import requests
+import base64
+
 from shutil import which
 
 DEFAULT_SERVER = os.environ.get("FLUX_SERVER", "http://127.0.0.1:8000")
