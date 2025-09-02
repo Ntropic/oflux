@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_BIN="${HERE}/flux_server.py"
+CLIENT_BIN="${HERE}/flux_client.py"
+SERVER_URL="${FLUX_SERVER:-http://127.0.0.1:8000}"
+
+usage() {
+  cat <<'EOF'
+flux - tiny model manager
+
+USAGE
+  flux serve [--host HOST] [--port PORT] [--config PATH] [--models PATH]
+  flux ls
+  flux defaults
+  flux unload
+  flux load <model-id>
+  flux rm <model-id>
+  flux run "prompt text ..." [options]
+  flux -h
+
+RUN OPTIONS
+  -m, --model MODEL         Model repo id to use (will be added on success)
+  -s, --steps N             Inference steps (e.g. 4–12 for previews)
+  -W, --width PX            Image width (default 512)
+  -H, --height PX           Image height (default 512)
+  -g, --guidance G          Guidance scale (default 3.5)
+  -n, --num-images K        Number of images (default 1)
+  -S, --seed N              Seed for reproducibility
+  -o, --outfile PATH        Output file or prefix (if -n>1)
+  -O, --outdir DIR          Directory to save images (client side, default .)
+  -p, --preview             Preview inline (Kitty terminal only)
+
+TIPS
+  • Start small (512x512, 4–8 steps) then scale up.
+  • Edit config.json to tweak unload_timeout, memory_fraction, defaults.
+  • Server auto-unloads models after inactivity.
+
+EXAMPLES
+  flux serve --host 127.0.0.1 --port 8000
+  flux ls
+  flux run "A neon samurai in the rain" -s 6 -W 512 -H 512 -p
+  flux load stabilityai/stable-diffusion-2-1
+  flux rm black-forest-labs/FLUX.1-schnell
+EOF
+}
+
+cmd="${1:-}"; shift || true
+
+case "${cmd}" in
+  serve)
+    host="127.0.0.1"; port="8000"; config="${HERE}/config.json"; models="${HERE}/models.json"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --host) host="$2"; shift 2 ;;
+        --port) port="$2"; shift 2 ;;
+        --config) config="$2"; shift 2 ;;
+        --models) models="$2"; shift 2 ;;
+        *) echo "Unknown arg: $1"; usage; exit 1 ;;
+      esac
+    done
+    # Hint: you may export this before serving to keep desktop smooth on ROCm
+    # export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:64"
+    exec python "$SERVER_BIN" --host "$host" --port "$port" --config "$config" --models "$models"
+    ;;
+
+  ls)         python "$CLIENT_BIN" --server "$SERVER_URL" ls ;;
+  defaults)   python "$CLIENT_BIN" --server "$SERVER_URL" defaults ;;
+  unload)     python "$CLIENT_BIN" --server "$SERVER_URL" unload ;;
+  load)       python "$CLIENT_BIN" --server "$SERVER_URL" load "$@" ;;
+  rm)         python "$CLIENT_BIN" --server "$SERVER_URL" rm "$@" ;;
+  run)        python "$CLIENT_BIN" --server "$SERVER_URL" run "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) echo "Unknown command: $cmd"; usage; exit 1 ;;
+esac
+
