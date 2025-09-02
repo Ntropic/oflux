@@ -5,10 +5,82 @@ import json
 import argparse
 import requests
 import base64
-
-from shutil import which
+import math
+import shutil
+import subprocess
+import tempfile
+from PIL import Image
+import base64 as b64mod
 
 DEFAULT_SERVER = os.environ.get("FLUX_SERVER", "http://127.0.0.1:8000")
+
+# ---------------- Preview helpers ---------------- #
+
+def make_grid(images, cols, rows, padding=2, bg=(0,0,0,0)):
+    img_w, img_h = images[0].size
+    grid_w = cols * img_w + (cols - 1) * padding
+    grid_h = rows * img_h + (rows - 1) * padding
+    grid = Image.new("RGBA", (grid_w, grid_h), bg)
+
+    for idx, img in enumerate(images):
+        r, c = divmod(idx, cols)
+        x = c * (img_w + padding)
+        y = r * (img_h + padding)
+        grid.paste(img.convert("RGBA"), (x, y))
+    return grid
+
+def show_in_terminal(path):
+    # Kitty
+    if shutil.which("kitty"):
+        try:
+            subprocess.run(["kitty", "+kitten", "icat", path], check=True)
+            return True
+        except Exception:
+            pass
+    # iTerm2
+    if os.environ.get("TERM_PROGRAM") == "iTerm.app":
+        with open(path, "rb") as f:
+            data = b64mod.b64encode(f.read()).decode("ascii")
+        sys.stdout.write(
+            f"\033]1337;File=inline=1;width=auto;height=auto;preserveAspectRatio=1:{data}\a\n"
+        )
+        sys.stdout.flush()
+        return True
+    # Sixel
+    if shutil.which("img2sixel"):
+        subprocess.run(["img2sixel", path])
+        return True
+    return False
+
+def preview_grid(paths, scale=0.5, padding=2):
+    if not paths:
+        return
+    # load & scale
+    images = []
+    for f in paths:
+        img = Image.open(f)
+        w, h = img.size
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        images.append(img)
+
+    n = len(images)
+    cols = int(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    grid = make_grid(images, cols, rows, padding)
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+        grid.save(tmp_path, format="PNG")
+
+    if not show_in_terminal(tmp_path):
+        if shutil.which("xdg-open"):
+            subprocess.Popen(["xdg-open", tmp_path])
+        elif shutil.which("open"):
+            subprocess.Popen(["open", tmp_path])
+        else:
+            print(f"[Preview] Saved at {tmp_path} (open manually)")
+
+# ---------------- Client UI ---------------- #
 
 def pretty_kv(title, kv):
     print(title)
@@ -51,7 +123,7 @@ def main():
     runp.add_argument("-S", "--seed", type=int, help="Seed")
     runp.add_argument("-o", "--outfile", default="out.png", help="Output file (or prefix if -n>1)")
     runp.add_argument("-O", "--outdir", default=".", help="Directory to save images (client side)")
-    runp.add_argument("-p", "--preview", action="store_true", help="Preview via Kitty icat if available")
+    runp.add_argument("-p", "--preview", action="store_true", help="Preview images in terminal")
 
     args = p.parse_args()
     S = args.server.rstrip("/")
@@ -75,7 +147,7 @@ def main():
             })
 
         elif args.cmd == "unload":
-            j = requests.post(f"{S}/unload").json()
+            requests.post(f"{S}/unload").json()
             print("Unloaded current model.")
 
         elif args.cmd == "load":
@@ -89,8 +161,7 @@ def main():
         elif args.cmd == "run":
             payload = {
                 "prompt": " ".join(args.prompt),
-                "want_bytes": True,   # ask server to return image bytes
-                # don't send 'outfile' unless user explicitly set it
+                "want_bytes": True,
             }
             if args.model is not None:      payload["model"] = args.model
             if args.steps is not None:      payload["steps"] = args.steps
@@ -99,12 +170,10 @@ def main():
             if args.guidance is not None:   payload["guidance"] = args.guidance
             if args.num_images is not None: payload["num_images"] = args.num_images
             if args.seed is not None:       payload["seed"] = args.seed
-            # only send outfile if user changed it from default behavior
-            if args.outfile != "out.png":
-                payload["outfile"] = args.outfile
+            if args.outfile != "out.png":   payload["outfile"] = args.outfile
 
             j = requests.post(f"{S}/generate", json=payload).json()
-            files = j.get("files", [])             # suggested filenames (no path)
+            files = j.get("files", [])
             images_b64 = j.get("images_b64", [])
             saved_server = j.get("saved", [])
             model = j.get("model")
@@ -120,7 +189,6 @@ def main():
                         f.write(base64.b64decode(b64))
                     local_paths.append(path)
             elif saved_server:
-                # If server saved (explicit outfile) but didn't send bytes, just show server paths
                 local_paths = saved_server
 
             print(f"Model: {model}")
@@ -132,9 +200,9 @@ def main():
                     for pth in local_paths:
                         print(f"  • {pth}")
 
-            if args.preview and os.environ.get("TERM", "").startswith("xterm-kitty") and which("kitty"):
-                if local_paths:
-                    os.system("kitty +kitten icat " + " ".join(local_paths))
+            if args.preview and local_paths:
+                preview_grid(local_paths, scale=0.5)
+
         else:
             p.print_help()
 

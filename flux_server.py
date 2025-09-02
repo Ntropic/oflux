@@ -229,36 +229,45 @@ def _clamp_and_seed(req):
 
     width = max(64, min(width, 1024))
     height = max(64, min(height, 1024))
-    num_images = max(1, min(num_images, 4))
     gen = torch.Generator(device="cpu").manual_seed(int(seed)) if seed is not None else None
     return steps, width, height, guidance, num_images, gen
 
 def _try_generate(req, steps, width, height, guidance, num_images, generator):
-    if req.seed is not None and num_images > 1:
-        images = []
-        for i in range(num_images):
-            gen_i = torch.Generator(device="cpu").manual_seed(int(req.seed) + i)
-            img = pipe(
-                req.prompt,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                height=height,
-                width=width,
-                num_images_per_prompt=1,
-                generator=gen_i
-            ).images[0]
-            images.append(img)
-        return images
-    else:
-        return pipe(
+    images = []
+    i = 0
+    while i < num_images:
+        # how many to generate in this batch (max 4 because pipeline caps there)
+        k = min(4, num_images - i)
+
+        if req.seed is not None:
+            # reproducible generators, one per image
+            gens = [
+                torch.Generator(device="cpu").manual_seed(int(req.seed) + j)
+                for j in range(i, i + k)
+            ]
+        else:
+            # non-deterministic generators, one per image
+            gens = [
+                torch.Generator(device="cpu").manual_seed(torch.seed())
+                for _ in range(k)
+            ] if generator is None else [generator for _ in range(k)]
+
+        # run one batch
+        out = pipe(
             req.prompt,
             num_inference_steps=steps,
             guidance_scale=guidance,
             height=height,
             width=width,
-            num_images_per_prompt=num_images,
-            generator=generator
-        ).images
+            num_images_per_prompt=k,
+            generator=gens
+        )
+
+        images.extend(out.images)
+        i += k
+
+    return images
+
 
 @app.post("/generate")
 def generate(req: GenRequest):
