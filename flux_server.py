@@ -234,15 +234,31 @@ def _clamp_and_seed(req):
     return steps, width, height, guidance, num_images, gen
 
 def _try_generate(req, steps, width, height, guidance, num_images, generator):
-    return pipe(
-        req.prompt,
-        num_inference_steps=steps,
-        guidance_scale=guidance,
-        height=height,
-        width=width,
-        num_images_per_prompt=num_images,
-        generator=generator
-    ).images
+    if req.seed is not None and num_images > 1:
+        images = []
+        for i in range(num_images):
+            gen_i = torch.Generator(device="cpu").manual_seed(int(req.seed) + i)
+            img = pipe(
+                req.prompt,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                height=height,
+                width=width,
+                num_images_per_prompt=1,
+                generator=gen_i
+            ).images[0]
+            images.append(img)
+        return images
+    else:
+        return pipe(
+            req.prompt,
+            num_inference_steps=steps,
+            guidance_scale=guidance,
+            height=height,
+            width=width,
+            num_images_per_prompt=num_images,
+            generator=generator
+        ).images
 
 @app.post("/generate")
 def generate(req: GenRequest):
@@ -280,47 +296,38 @@ def generate(req: GenRequest):
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}") from e
 
     # ----- Save or return bytes -----
-    saved = []          # absolute paths saved on server (only if outfile is provided)
-    suggested = []      # filenames suggested for the client (no directory)
+    saved = []          # absolute paths saved on server (if outfile is given)
+    suggested = []      # filenames suggested for client
     images_b64 = []     # base64-encoded images (if want_bytes=True)
+    seeds = []          # actual seeds used
 
-    # Decide file extension (based on requested format or explicit outfile ext)
     fmt = (req.format or "png").lower()
     ext = ".png" if fmt == "png" else ".jpg" if fmt in ("jpg", "jpeg") else ".webp"
 
+    # Base root (explicit or from prompt)
     if req.outfile:
-        # Caller explicitly wants the server to save at this path/prefix
         root, ext_out = os.path.splitext(req.outfile)
         if ext_out:
-            ext = ext_out  # respect explicit extension in outfile
-        if len(images) == 1:
-            server_path = req.outfile if ext_out else (root + ext)
-            images[0].save(server_path)
-            saved.append(server_path)
-            suggested.append(os.path.basename(server_path))
-        else:
-            base = root
-            for i, img in enumerate(images):
-                server_path = f"{base}_{i+1}{ext}"
-                img.save(server_path)
-                saved.append(server_path)
-                suggested.append(os.path.basename(server_path))
+            ext = ext_out
     else:
-        # Do NOT save on server. Suggest filenames derived from the prompt.
-        prefix = summarize_prompt(req.prompt)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = f"{prefix}_{ts}"
-        if len(images) == 1:
-            suggested.append(f"{base}{ext}")
-        else:
-            for i in range(len(images)):
-                suggested.append(f"{base}_{i+1}{ext}")
+        root = summarize_prompt(req.prompt)
 
-    # Always optionally return bytes so the CLIENT can save into its CWD
-    if req.want_bytes:
-        for img in images:
+    # Per-image saving
+    base_seed = req.seed if req.seed is not None else torch.seed() % (2**31)
+    for i, img in enumerate(images):
+        seed_i = base_seed + i
+        seeds.append(seed_i)
+
+        fname = f"{root}_seed{seed_i}{ext}"
+        if req.outfile:  # save on server
+            img.save(fname)
+            saved.append(os.path.abspath(fname))
+
+        suggested.append(os.path.basename(fname))
+
+        if req.want_bytes:
             buf = BytesIO()
-            pil_fmt = "PNG" if ext.lower() == ".png" else "JPEG" if ext.lower() in [".jpg", ".jpeg"] else "WEBP"
+            pil_fmt = "PNG" if ext == ".png" else "JPEG" if ext in (".jpg", ".jpeg") else "WEBP"
             img.save(buf, format=pil_fmt)
             images_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
 
@@ -328,9 +335,10 @@ def generate(req: GenRequest):
     return {
         "status": "ok",
         "model": current_model,
-        "saved": saved,                 # server-side saved files (if any)
-        "files": suggested,             # suggested filenames (no directory)
-        "images_b64": images_b64,       # base64 images if requested
+        "saved": saved,
+        "files": suggested,
+        "images_b64": images_b64,
+        "seeds": seeds,   # 👈 added
         "width": width,
         "height": height,
         "steps": steps,

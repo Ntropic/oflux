@@ -11,14 +11,14 @@ usage() {
 flux - tiny model manager
 
 USAGE
-  flux serve [--host HOST] [--port PORT] [--config PATH] [--models PATH]
-  flux ls
-  flux defaults
-  flux unload
-  flux load <model-id>
-  flux rm <model-id>
-  flux run "prompt text ..." [options]
-  flux -h
+  oflux serve [--host HOST] [--port PORT] [--config PATH] [--models PATH]
+  oflux ls
+  oflux defaults
+  oflux unload
+  oflux load <model-id>
+  oflux rm <model-id>
+  oflux run "prompt text ..." [options]
+  oflux -h
 
 RUN OPTIONS
   -m, --model MODEL         Model repo id to use (will be added on success)
@@ -33,16 +33,14 @@ RUN OPTIONS
   -p, --preview             Preview inline (Kitty terminal only)
 
 TIPS
-  • Start small (512x512, 4–8 steps) then scale up.
-  • Edit config.json to tweak unload_timeout, memory_fraction, defaults.
-  • Server auto-unloads models after inactivity.
+  - Start small (512x512, 4–8 steps) then scale up.
+  - Edit config.json to tweak unload_timeout, memory_fraction, defaults.
+  - Server auto-unloads models after inactivity.
 
 EXAMPLES
   flux serve --host 127.0.0.1 --port 8000
   flux ls
-  flux run "A neon samurai in the rain" -s 6 -W 512 -H 512 -p
-  flux load stabilityai/stable-diffusion-2-1
-  flux rm black-forest-labs/FLUX.1-schnell
+  flux run "A neon samurai in the rain" -s 6 -p
 EOF
 }
 
