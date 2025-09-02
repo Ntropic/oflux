@@ -1,0 +1,17 @@
+{
+  "default_model": "black-forest-labs/FLUX.1-schnell",
+  "unload_timeout": 300,
+  "memory_fraction": 0.8,
+  "defaults": {
+    "steps": 6,
+    "width": 512,
+    "height": 512,
+    "guidance": 3.5,
+    "num_images": 1,
+    "seed": null
+  },
+  "available_models": [
+    "black-forest-labs/FLUX.1-schnell",
+  ]
+}
+
