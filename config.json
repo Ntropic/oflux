@@ -11,6 +11,7 @@
   },
   "memory_fraction": 0.75,
   "unload_timeout": 300,
-  "default_model": "black-forest-labs/FLUX.1-schnell"
+  "default_model": "black-forest-labs/FLUX.1-schnell",
+  "default_lora": "ostris/flux-dev-lora"
 }
 

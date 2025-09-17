@@ -17,6 +17,8 @@ USAGE
   oflux unload
   oflux load <model-id>
   oflux rm <model-id>
+  oflux rm --lora <adapter-id>
+  oflux cli
   oflux run "prompt text ..." [options]
   oflux -h
 
@@ -28,6 +30,9 @@ RUN OPTIONS
   -g, --guidance G          Guidance scale (default 3.5)
   -n, --num-images K        Number of images (default 1)
   -S, --seed N              Seed for reproducibility
+  -L, --lora ID             Apply a Hugging Face LoRA adapter
+      --lora-scale S        Scale for the LoRA adapter (default 1.0)
+  -l, --last                Reuse the last generation settings stored on the server
   -o, --outfile PATH        Output file or prefix (if -n>1)
   -O, --outdir DIR          Directory to save images (client side, default .)
   -p, --preview             Preview inline (Kitty terminal only)
@@ -68,6 +73,7 @@ case "${cmd}" in
   unload)     python "$CLIENT_BIN" --server "$SERVER_URL" unload ;;
   load)       python "$CLIENT_BIN" --server "$SERVER_URL" load "$@" ;;
   rm)         python "$CLIENT_BIN" --server "$SERVER_URL" rm "$@" ;;
+  cli)        python "$CLIENT_BIN" --server "$SERVER_URL" cli ;;
   run)        python "$CLIENT_BIN" --server "$SERVER_URL" run "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "Unknown command: $cmd"; usage; exit 1 ;;

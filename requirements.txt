@@ -9,4 +9,5 @@ pydantic
 sentencepiece
 protobuf
 requests
+prompt_toolkit
 
