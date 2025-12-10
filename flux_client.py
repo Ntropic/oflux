@@ -108,6 +108,10 @@ def main():
 
     loadp = sub.add_parser("load", help="Preload a model (adds to list if successful)")
     loadp.add_argument("model", help="Repo id, e.g. black-forest-labs/FLUX.1-schnell")
+    loadp.add_argument("--quantize", choices=["none", "bnb4", "bnb8"], help="Quantization mode")
+
+    pullp = sub.add_parser("pull", help="Download a model without loading it")
+    pullp.add_argument("model", help="Repo id to download")
 
     rmp = sub.add_parser("rm", help="Remove a model from list and delete its cache")
     rmp.add_argument("model", help="Repo id to remove")
@@ -124,6 +128,7 @@ def main():
     runp.add_argument("-o", "--outfile", default="out.png", help="Output file (or prefix if -n>1)")
     runp.add_argument("-O", "--outdir", default=".", help="Directory to save images (client side)")
     runp.add_argument("-p", "--preview", action="store_true", help="Preview images in terminal")
+    runp.add_argument("-q", "--quantize", choices=["none", "bnb4", "bnb8"], help="Quantization override")
 
     args = p.parse_args()
     S = args.server.rstrip("/")
@@ -151,8 +156,15 @@ def main():
             print("Unloaded current model.")
 
         elif args.cmd == "load":
-            j = requests.post(f"{S}/load", params={"model": args.model}).json()
+            params = {"model": args.model}
+            if args.quantize:
+                params["quantize"] = args.quantize
+            j = requests.post(f"{S}/load", params=params).json()
             print(f"Loaded: {j.get('model')}")
+
+        elif args.cmd == "pull":
+            j = requests.post(f"{S}/pull", params={"model": args.model}).json()
+            print(f"Pulled: {j.get('model')} -> {j.get('cache_dir')}")
 
         elif args.cmd == "rm":
             j = requests.delete(f"{S}/models", params={"model": args.model}).json()
@@ -164,6 +176,7 @@ def main():
                 "want_bytes": True,
             }
             if args.model is not None:      payload["model"] = args.model
+            if args.quantize is not None:   payload["quantize"] = None if args.quantize == "none" else args.quantize
             if args.steps is not None:      payload["steps"] = args.steps
             if args.width is not None:      payload["width"] = args.width
             if args.height is not None:     payload["height"] = args.height

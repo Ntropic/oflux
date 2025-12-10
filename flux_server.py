@@ -15,6 +15,12 @@ from pydantic import BaseModel
 import uvicorn
 
 from diffusers import FluxPipeline, Flux2Pipeline, StableDiffusionPipeline
+from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub import HfFolder, login, snapshot_download
+try:
+    from transformers import BitsAndBytesConfig
+except ImportError:
+    BitsAndBytesConfig = None
 import base64
 from io import BytesIO
 import re
@@ -55,6 +61,8 @@ config = load_json(args.config, {
     "offload": "sequential",
     "defaults": {"steps": 4, "width": 512, "height": 512, "guidance": 3.5, "num_images": 1, "seed": None, "dtype": "bfloat16"},
     "default_model": "black-forest-labs/FLUX.1-schnell",
+    # Quantization preferences are matched by substring; "none" disables.
+    "quantization": {"flux.2": "bnb4"}
 })
 models_state = load_json(args.models, {"models": [], "loaded": None})
 
@@ -63,6 +71,7 @@ MEMORY_FRACTION: float = float(config.get("memory_fraction", 0.75))
 OFFLOAD_KIND: str = str(config.get("offload", "sequential")).lower()
 DEFAULTS = config.get("defaults", {})
 DEFAULT_MODEL: str = config.get("default_model", "")
+QUANTIZATION_PREFS = {k.lower(): v for k, v in config.get("quantization", {}).items()}
 
 HF_HUB_BASE = os.path.expanduser("~/.cache/huggingface/hub")
 HF_DIFFUSERS_BASE = os.path.expanduser("~/.cache/huggingface/diffusers")
@@ -92,6 +101,14 @@ def _remove_model_from_cache(model_id: str) -> List[str]:
             shutil.rmtree(p, ignore_errors=True)
             removed.append(p)
     return removed
+
+
+def _candidate_model_ids(model_id: str):
+    yield model_id
+    prefix = "black-forest-labs/"
+    if not model_id.lower().startswith(prefix):
+        base = model_id.split("/")[-1]
+        yield prefix + base
 
 def _unload():
     global pipe, current_model, unload_timer
@@ -140,31 +157,184 @@ def _select_pipeline_cls(model_id: str):
     # Fallback - Stable Diffusion
     return StableDiffusionPipeline
 
-def _load(model_id: str):
+
+def _quantization_for(model_id: str, override: Optional[str] = None):
+    """Return a BitsAndBytesConfig for the given model, if requested."""
+    pref = (override or "").lower() or None
+    if pref is None:
+        for key, value in QUANTIZATION_PREFS.items():
+            if key in model_id.lower():
+                pref = (value or "").lower()
+                break
+    if not pref or pref == "none":
+        return None
+    if BitsAndBytesConfig is None:
+        print("[Quantization] transformers/bitsandbytes not available; loading without quantization.")
+        return None
+    if pref in ("bnb4", "4bit", "bitsandbytes4", "bnb-4bit"):
+        return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+    if pref in ("bnb8", "8bit", "bitsandbytes8", "bnb-8bit"):
+        return BitsAndBytesConfig(load_in_8bit=True)
+    print(f"[Quantization] Unknown quantization preference '{pref}', skipping quantization.")
+    return None
+
+def _env_hf_token() -> Optional[str]:
+    for k in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
+        if os.environ.get(k):
+            return os.environ[k].strip()
+    return None
+
+def _ensure_hf_auth(model_id: str) -> Optional[str]:
+    """Ensure a HuggingFace token is available, prompting the user if needed."""
+
+    # Already logged in (cached) or provided via env
+    token = HfFolder.get_token() or _env_hf_token()
+    if token:
+        try:
+            login(token=token, add_to_git_credential=False)
+            return HfFolder.get_token() or token
+        except Exception as e:
+            print(f"[Auth] Failed to use existing token: {e}")
+
+    # Interactive login fallback
+    print(
+        f"[Auth] Model '{model_id}' requires authentication. "
+        "Log in with your HuggingFace token to continue."
+    )
+    try:
+        login(add_to_git_credential=False)
+        return HfFolder.get_token()
+    except Exception as e:
+        print(f"[Auth] Login failed: {e}")
+        return None
+
+
+def _pull_model(model_id: str) -> str:
+    """Download model files into the local HuggingFace cache without loading."""
+
+    def _download(repo_id: str, token: Optional[str]):
+        return snapshot_download(
+            repo_id=repo_id,
+            token=token,
+            resume_download=True,
+        )
+
+    last_error = None
+    for candidate in _candidate_model_ids(model_id):
+        try:
+            cache_dir = _download(candidate, HfFolder.get_token() or _env_hf_token())
+        except HfHubHTTPError as e:
+            last_error = e
+            if e.response is not None and e.response.status_code in (401, 403):
+                print(f"[Auth] Access to {candidate} requires authentication.")
+                token = _ensure_hf_auth(candidate)
+                if not token:
+                    continue
+                try:
+                    cache_dir = _download(candidate, token)
+                except Exception:
+                    continue
+            elif e.response is not None and e.response.status_code == 404:
+                if candidate != model_id:
+                    print(f"[Lookup] {model_id} not found; retrying as {candidate}")
+                    continue
+                else:
+                    print(f"[ERROR] Failed to pull {candidate} (not found)")
+                    import traceback; traceback.print_exc()
+                    continue
+            else:
+                print(f"[ERROR] Failed to pull {candidate}")
+                import traceback; traceback.print_exc()
+                continue
+        except Exception as e:
+            last_error = e
+            print(f"[ERROR] Failed to pull {candidate}")
+            import traceback; traceback.print_exc()
+            continue
+
+        # success
+        if candidate not in models_state["models"]:
+            models_state["models"].append(candidate)
+            save_models()
+        return cache_dir
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"Failed to pull {model_id}")
+
+def _load(model_id: str, quantize: Optional[str] = None):
     """Load a model; on success add to models.json."""
     global pipe, current_model
     _unload()
     print(f"[Loading] Loading model: {model_id}")
 
     torch_dtype = _choose_dtype(DEFAULTS.get("dtype", "bfloat16"))
-    pipeline_cls = _select_pipeline_cls(model_id)
 
-    try:
-        pipe = pipeline_cls.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            use_safetensors=True,
-        )
-        _apply_offload(pipe)
-    except Exception as e:
-        print(f"[ERROR] Failed to load {model_id}")
-        import traceback; traceback.print_exc()
-        raise
+    last_error = None
+    resolved_id = None
+    for candidate in _candidate_model_ids(model_id):
+        pipeline_cls = _select_pipeline_cls(candidate)
+        quant_config = _quantization_for(candidate, override=quantize)
+        extra_kwargs = {}
+        if quant_config is not None:
+            extra_kwargs["quantization_config"] = quant_config
+            extra_kwargs["device_map"] = "auto"
 
-    current_model = model_id
-    models_state["loaded"] = model_id
-    if model_id not in models_state["models"]:
-        models_state["models"].append(model_id)
+        def _load_pipeline(token: Optional[str]):
+            return pipeline_cls.from_pretrained(
+                candidate,
+                torch_dtype=torch_dtype,
+                use_safetensors=True,
+                token=token,
+                **extra_kwargs,
+            )
+
+        try:
+            pipe = _load_pipeline(HfFolder.get_token() or _env_hf_token())
+            _apply_offload(pipe)
+            resolved_id = candidate
+            break
+        except HfHubHTTPError as e:
+            last_error = e
+            if e.response is not None and e.response.status_code in (401, 403):
+                print(f"[Auth] Access to {candidate} requires authentication.")
+                token = _ensure_hf_auth(candidate)
+                if not token:
+                    continue
+                try:
+                    pipe = _load_pipeline(token)
+                    _apply_offload(pipe)
+                    resolved_id = candidate
+                    break
+                except Exception:
+                    continue
+            elif e.response is not None and e.response.status_code == 404:
+                if candidate != model_id:
+                    print(f"[Lookup] {model_id} not found; retrying as {candidate}")
+                    continue
+                else:
+                    print(f"[ERROR] Failed to load {candidate} (not found)")
+                    import traceback; traceback.print_exc()
+                    continue
+            else:
+                print(f"[ERROR] Failed to load {candidate}")
+                import traceback; traceback.print_exc()
+                continue
+        except Exception as e:
+            last_error = e
+            print(f"[ERROR] Failed to load {candidate}")
+            import traceback; traceback.print_exc()
+            continue
+
+    if resolved_id is None:
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Failed to load {model_id}")
+
+    current_model = resolved_id
+    models_state["loaded"] = resolved_id
+    if resolved_id not in models_state["models"]:
+        models_state["models"].append(resolved_id)
     save_models()
     return pipe
 
@@ -173,6 +343,7 @@ def _load(model_id: str):
 class GenRequest(BaseModel):
     prompt: str
     model: Optional[str] = None
+    quantize: Optional[str] = None
     steps: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
@@ -201,7 +372,8 @@ def get_defaults():
         "memory_fraction": MEMORY_FRACTION,
         "offload": OFFLOAD_KIND,
         "defaults": DEFAULTS,
-        "default_model": DEFAULT_MODEL
+        "default_model": DEFAULT_MODEL,
+        "quantization": QUANTIZATION_PREFS,
     }
 
 @app.get("/models")
@@ -210,13 +382,25 @@ def list_models():
     return {"available": models_state["models"], "loaded": models_state["loaded"]}
 
 @app.post("/load")
-def load_model(model: str = Query(..., description="Repo id, e.g. black-forest-labs/FLUX.1-schnell")):
+def load_model(
+    model: str = Query(..., description="Repo id, e.g. black-forest-labs/FLUX.1-schnell"),
+    quantize: Optional[str] = Query(None, description="Quantization mode: none|bnb4|bnb8"),
+):
     global pipe
     try:
-        pipe = _load(model)
-        return {"status": "loaded", "model": model}
+        pipe = _load(model, quantize=quantize)
+        return {"status": "loaded", "model": current_model, "quantize": quantize or "auto"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load {model}: {e}")
+
+
+@app.post("/pull")
+def pull_model(model: str = Query(..., description="Repo id to download without loading")):
+    try:
+        cache_dir = _pull_model(model)
+        return {"status": "pulled", "model": model, "cache_dir": cache_dir}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to pull {model}: {e}")
 
 @app.post("/unload")
 def unload_model():
@@ -291,7 +475,7 @@ def generate(req: GenRequest):
     # Load (and add to list) if needed
     if current_model != model_id or pipe is None:
         try:
-            pipe = _load(model_id)
+            pipe = _load(model_id, quantize=req.quantize)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to load {model_id}: {e}")
 

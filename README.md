@@ -9,11 +9,11 @@ Inspired by [ollama](https://ollama.com/), it instead provides a simple interfac
 ```bash
 git clone https://github.com/Ntropic/oflux.git
 cd oflux
-conda create -n oflux python=3.11 -y
-conda activate oflux
-pip install -r requirements.txt  # optionally: pip install -r requirements_rocm.txt
-chmod +x oflux 
+chmod +x oflux
+./oflux  # first run guides dependency install and PATH setup
 ```
+
+On first launch, the wrapper auto-installs Python requirements (prompting for the ROCm variant when interactive) and offers to symlink `oflux` into `~/.local/bin` so new shells can find it. If you start the installer from an active conda environment, that environment name is recorded and re-activated on future runs when possible.
 
 ## Usage
 
@@ -28,6 +28,14 @@ List currently downloaded models:
 ```bash
 oflux ls
 ```
+
+Prefetch a gated or large model without loading it:
+
+```bash
+oflux pull black-forest-labs/FLUX.1-schnell
+```
+
+If a repo cannot be found, `oflux` automatically retries by prefixing `black-forest-labs/` to the requested model name.
 
 Generate an image:
 
@@ -51,6 +59,12 @@ Optional options for `run`
 | `-o, --outfile PATH`  | Output file or prefix (if `-n>1`). If missing will auto-generate a name from prompt |
 | `-O, --outdir DIR`    | Directory to save images (client side, default `.`) |
 | `-p, --preview`       | Preview inline (Kitty terminal only) |
+| `-q, --quantize MODE` | Quantization override (`none`, `bnb4`, `bnb8`) |
+
+### Quantization
+
+* The server chooses quantization based on `config.json`. By default, any model containing `flux.2` is loaded in 4-bit (bitsandbytes) to fit on more GPUs. Override per run with `-q`/`--quantize` or set `"quantization"` in `config.json` (e.g., `{ "flux.2": "bnb4" }`).
+* Requires the `bitsandbytes` dependency (installed automatically on first run).
 
 
 #### Other commands:
@@ -59,6 +73,7 @@ Optional options for `run`
 oflux defaults
 oflux unload
 oflux load <model-id>
+oflux pull <model-id>
 oflux rm <model-id>
 oflux -h
 ```
