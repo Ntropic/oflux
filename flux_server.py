@@ -15,6 +15,8 @@ from pydantic import BaseModel
 import uvicorn
 
 from diffusers import FluxPipeline, Flux2Pipeline, StableDiffusionPipeline
+from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub import HfFolder, login
 import base64
 from io import BytesIO
 import re
@@ -140,6 +142,36 @@ def _select_pipeline_cls(model_id: str):
     # Fallback - Stable Diffusion
     return StableDiffusionPipeline
 
+def _env_hf_token() -> Optional[str]:
+    for k in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
+        if os.environ.get(k):
+            return os.environ[k].strip()
+    return None
+
+def _ensure_hf_auth(model_id: str) -> Optional[str]:
+    """Ensure a HuggingFace token is available, prompting the user if needed."""
+
+    # Already logged in (cached) or provided via env
+    token = HfFolder.get_token() or _env_hf_token()
+    if token:
+        try:
+            login(token=token, add_to_git_credential=False)
+            return HfFolder.get_token() or token
+        except Exception as e:
+            print(f"[Auth] Failed to use existing token: {e}")
+
+    # Interactive login fallback
+    print(
+        f"[Auth] Model '{model_id}' requires authentication. "
+        "Log in with your HuggingFace token to continue."
+    )
+    try:
+        login(add_to_git_credential=False)
+        return HfFolder.get_token()
+    except Exception as e:
+        print(f"[Auth] Login failed: {e}")
+        return None
+
 def _load(model_id: str):
     """Load a model; on success add to models.json."""
     global pipe, current_model
@@ -149,14 +181,30 @@ def _load(model_id: str):
     torch_dtype = _choose_dtype(DEFAULTS.get("dtype", "bfloat16"))
     pipeline_cls = _select_pipeline_cls(model_id)
 
-    try:
-        pipe = pipeline_cls.from_pretrained(
+    def _load_pipeline(token: Optional[str]):
+        return pipeline_cls.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
             use_safetensors=True,
+            token=token,
         )
+
+    try:
+        pipe = _load_pipeline(HfFolder.get_token() or _env_hf_token())
         _apply_offload(pipe)
-    except Exception as e:
+    except HfHubHTTPError as e:
+        if e.response is not None and e.response.status_code in (401, 403):
+            print(f"[Auth] Access to {model_id} requires authentication.")
+            token = _ensure_hf_auth(model_id)
+            if not token:
+                raise
+            pipe = _load_pipeline(token)
+            _apply_offload(pipe)
+        else:
+            print(f"[ERROR] Failed to load {model_id}")
+            import traceback; traceback.print_exc()
+            raise
+    except Exception:
         print(f"[ERROR] Failed to load {model_id}")
         import traceback; traceback.print_exc()
         raise
