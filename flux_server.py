@@ -158,15 +158,20 @@ def _select_pipeline_cls(model_id: str):
     return StableDiffusionPipeline
 
 
-def _quantization_for(model_id: str, override: Optional[str] = None):
-    """Return a BitsAndBytesConfig for the given model, if requested."""
+def _quant_mode(model_id: str, override: Optional[str] = None) -> Optional[str]:
     pref = (override or "").lower() or None
     if pref is None:
         for key, value in QUANTIZATION_PREFS.items():
             if key in model_id.lower():
                 pref = (value or "").lower()
                 break
-    if not pref or pref == "none":
+    if pref in (None, "", "none"):
+        return None
+    return pref
+
+
+def _quant_config(pref: Optional[str]):
+    if pref is None:
         return None
     if BitsAndBytesConfig is None:
         print("[Quantization] transformers/bitsandbytes not available; loading without quantization.")
@@ -177,6 +182,33 @@ def _quantization_for(model_id: str, override: Optional[str] = None):
         return BitsAndBytesConfig(load_in_8bit=True)
     print(f"[Quantization] Unknown quantization preference '{pref}', skipping quantization.")
     return None
+
+
+def _quantization_for(model_id: str, quantize: Optional[str] = None, quantize_text: Optional[str] = None, quantize_transformer: Optional[str] = None):
+    """Return a BitsAndBytesConfig or map for selected components."""
+    base_pref = _quant_mode(model_id, override=quantize)
+    text_pref = _quant_mode(model_id, override=quantize_text)
+    transformer_pref = _quant_mode(model_id, override=quantize_transformer)
+
+    if text_pref is None:
+        text_pref = base_pref
+    if transformer_pref is None:
+        transformer_pref = base_pref
+
+    configs = {}
+    text_cfg = _quant_config(text_pref)
+    transformer_cfg = _quant_config(transformer_pref)
+    if transformer_cfg is not None:
+        configs["transformer"] = transformer_cfg
+    if text_cfg is not None:
+        configs["text_encoder"] = text_cfg
+        configs["text_encoder_2"] = text_cfg
+
+    if not configs:
+        return None
+    if len(configs) == 1 and "transformer" in configs:
+        return configs["transformer"]
+    return configs
 
 def _env_hf_token() -> Optional[str]:
     for k in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
@@ -262,7 +294,7 @@ def _pull_model(model_id: str) -> str:
         raise last_error
     raise RuntimeError(f"Failed to pull {model_id}")
 
-def _load(model_id: str, quantize: Optional[str] = None):
+def _load(model_id: str, quantize: Optional[str] = None, quantize_text: Optional[str] = None, quantize_transformer: Optional[str] = None):
     """Load a model; on success add to models.json."""
     global pipe, current_model
     _unload()
@@ -274,7 +306,12 @@ def _load(model_id: str, quantize: Optional[str] = None):
     resolved_id = None
     for candidate in _candidate_model_ids(model_id):
         pipeline_cls = _select_pipeline_cls(candidate)
-        quant_config = _quantization_for(candidate, override=quantize)
+        quant_config = _quantization_for(
+            candidate,
+            quantize=quantize,
+            quantize_text=quantize_text,
+            quantize_transformer=quantize_transformer,
+        )
         extra_kwargs = {}
         if quant_config is not None:
             extra_kwargs["quantization_config"] = quant_config
@@ -344,6 +381,8 @@ class GenRequest(BaseModel):
     prompt: str
     model: Optional[str] = None
     quantize: Optional[str] = None
+    quantize_text: Optional[str] = None
+    quantize_transformer: Optional[str] = None
     steps: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
@@ -384,12 +423,25 @@ def list_models():
 @app.post("/load")
 def load_model(
     model: str = Query(..., description="Repo id, e.g. black-forest-labs/FLUX.1-schnell"),
-    quantize: Optional[str] = Query(None, description="Quantization mode: none|bnb4|bnb8"),
+    quantize: Optional[str] = Query(None, description="Quantization mode: none|bnb4|bnb8 (applies to both unless overridden)"),
+    quantize_text: Optional[str] = Query(None, description="Quantization for text encoder: none|bnb4|bnb8"),
+    quantize_transformer: Optional[str] = Query(None, description="Quantization for transformer: none|bnb4|bnb8"),
 ):
     global pipe
     try:
-        pipe = _load(model, quantize=quantize)
-        return {"status": "loaded", "model": current_model, "quantize": quantize or "auto"}
+        pipe = _load(
+            model,
+            quantize=quantize,
+            quantize_text=quantize_text,
+            quantize_transformer=quantize_transformer,
+        )
+        return {
+            "status": "loaded",
+            "model": current_model,
+            "quantize": quantize or "auto",
+            "quantize_text": quantize_text or (quantize or "auto"),
+            "quantize_transformer": quantize_transformer or (quantize or "auto"),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load {model}: {e}")
 
@@ -475,7 +527,12 @@ def generate(req: GenRequest):
     # Load (and add to list) if needed
     if current_model != model_id or pipe is None:
         try:
-            pipe = _load(model_id, quantize=req.quantize)
+            pipe = _load(
+                model_id,
+                quantize=req.quantize,
+                quantize_text=req.quantize_text,
+                quantize_transformer=req.quantize_transformer,
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to load {model_id}: {e}")
 

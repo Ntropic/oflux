@@ -59,11 +59,14 @@ Optional options for `run`
 | `-o, --outfile PATH`  | Output file or prefix (if `-n>1`). If missing will auto-generate a name from prompt |
 | `-O, --outdir DIR`    | Directory to save images (client side, default `.`) |
 | `-p, --preview`       | Preview inline (Kitty terminal only) |
-| `-q, --quantize MODE` | Quantization override (`none`, `bnb4`, `bnb8`) |
+| `-q, --quantize MODE` | Quantize both text + transformer (`none`, `bnb4`, `bnb8`) |
+| `--quantize-text MODE` | Quantize just the text encoder (`none`, `bnb4`, `bnb8`) |
+| `--quantize-transformer MODE` | Quantize just the transformer/UNet (`none`, `bnb4`, `bnb8`) |
 
 ### Quantization
 
 * The server chooses quantization based on `config.json`. By default, any model containing `flux.2` is loaded in 4-bit (bitsandbytes) to fit on more GPUs. Override per run with `-q`/`--quantize` or set `"quantization"` in `config.json` (e.g., `{ "flux.2": "bnb4" }`).
+* You can quantize components separately. Use `--quantize-text` (text encoder) and/or `--quantize-transformer` (UNet/transformer). If only `-q/--quantize` is provided it applies to both components.
 * Requires the `bitsandbytes` dependency (installed automatically on first run).
 
 

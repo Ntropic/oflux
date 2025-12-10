@@ -109,6 +109,8 @@ def main():
     loadp = sub.add_parser("load", help="Preload a model (adds to list if successful)")
     loadp.add_argument("model", help="Repo id, e.g. black-forest-labs/FLUX.1-schnell")
     loadp.add_argument("--quantize", choices=["none", "bnb4", "bnb8"], help="Quantization mode")
+    loadp.add_argument("--quantize-text", choices=["none", "bnb4", "bnb8"], help="Quantization just for the text encoder")
+    loadp.add_argument("--quantize-transformer", choices=["none", "bnb4", "bnb8"], help="Quantization just for the transformer/UNet")
 
     pullp = sub.add_parser("pull", help="Download a model without loading it")
     pullp.add_argument("model", help="Repo id to download")
@@ -129,6 +131,8 @@ def main():
     runp.add_argument("-O", "--outdir", default=".", help="Directory to save images (client side)")
     runp.add_argument("-p", "--preview", action="store_true", help="Preview images in terminal")
     runp.add_argument("-q", "--quantize", choices=["none", "bnb4", "bnb8"], help="Quantization override")
+    runp.add_argument("--quantize-text", choices=["none", "bnb4", "bnb8"], help="Quantization just for the text encoder")
+    runp.add_argument("--quantize-transformer", choices=["none", "bnb4", "bnb8"], help="Quantization just for the transformer/UNet")
 
     args = p.parse_args()
     S = args.server.rstrip("/")
@@ -159,6 +163,10 @@ def main():
             params = {"model": args.model}
             if args.quantize:
                 params["quantize"] = args.quantize
+            if args.quantize_text:
+                params["quantize_text"] = args.quantize_text
+            if args.quantize_transformer:
+                params["quantize_transformer"] = args.quantize_transformer
             j = requests.post(f"{S}/load", params=params).json()
             print(f"Loaded: {j.get('model')}")
 
@@ -177,6 +185,8 @@ def main():
             }
             if args.model is not None:      payload["model"] = args.model
             if args.quantize is not None:   payload["quantize"] = None if args.quantize == "none" else args.quantize
+            if args.quantize_text is not None: payload["quantize_text"] = None if args.quantize_text == "none" else args.quantize_text
+            if args.quantize_transformer is not None: payload["quantize_transformer"] = None if args.quantize_transformer == "none" else args.quantize_transformer
             if args.steps is not None:      payload["steps"] = args.steps
             if args.width is not None:      payload["width"] = args.width
             if args.height is not None:     payload["height"] = args.height
