@@ -108,6 +108,10 @@ def main():
 
     loadp = sub.add_parser("load", help="Preload a model (adds to list if successful)")
     loadp.add_argument("model", help="Repo id, e.g. black-forest-labs/FLUX.1-schnell")
+    loadp.add_argument("--quantize", choices=["auto", "none", "bnb4", "bnb8"], help="Quantization mode (auto to clear override)")
+
+    pullp = sub.add_parser("pull", help="Download a model without loading it")
+    pullp.add_argument("model", help="Repo id to download")
 
     rmp = sub.add_parser("rm", help="Remove a model from list and delete its cache")
     rmp.add_argument("model", help="Repo id to remove")
@@ -124,6 +128,18 @@ def main():
     runp.add_argument("-o", "--outfile", default="out.png", help="Output file (or prefix if -n>1)")
     runp.add_argument("-O", "--outdir", default=".", help="Directory to save images (client side)")
     runp.add_argument("-p", "--preview", action="store_true", help="Preview images in terminal")
+    runp.add_argument("-q", "--quantize", choices=["auto", "none", "bnb4", "bnb8"], help="Quantization override")
+
+    set_model = sub.add_parser("set-defaults", help="Set defaults for a specific model")
+    set_model.add_argument("model", help="Model repo id to update")
+    set_model.add_argument("--steps", type=int)
+    set_model.add_argument("--width", type=int)
+    set_model.add_argument("--height", type=int)
+    set_model.add_argument("--guidance", type=float)
+    set_model.add_argument("--num-images", type=int)
+    set_model.add_argument("--seed", type=int)
+    set_model.add_argument("--dtype")
+    set_model.add_argument("--quantize", choices=["auto", "none", "bnb4", "bnb8"], help="Quantization default for this model")
 
     args = p.parse_args()
     S = args.server.rstrip("/")
@@ -145,18 +161,44 @@ def main():
                 "default_model": j.get("default_model"),
                 "server": S
             })
+            md = j.get("model_defaults", {})
+            if md:
+                print("Model defaults:")
+                for model, vals in md.items():
+                    print(f"  {model} -> {vals}")
+                print()
 
         elif args.cmd == "unload":
             requests.post(f"{S}/unload").json()
             print("Unloaded current model.")
 
         elif args.cmd == "load":
-            j = requests.post(f"{S}/load", params={"model": args.model}).json()
+            params = {"model": args.model}
+            if args.quantize:
+                params["quantize"] = None if args.quantize == "auto" else args.quantize
+            resp = requests.post(f"{S}/load", params=params)
+            if resp.status_code >= 400:
+                print(f"Load failed: {resp.text}", file=sys.stderr)
+                sys.exit(1)
+            j = resp.json()
             print(f"Loaded: {j.get('model')}")
+
+        elif args.cmd == "pull":
+            j = requests.post(f"{S}/pull", params={"model": args.model}).json()
+            print(f"Pulled: {j.get('model')} -> {j.get('cache_dir')}")
 
         elif args.cmd == "rm":
             j = requests.delete(f"{S}/models", params={"model": args.model}).json()
             print(f"Removed: {j.get('model')}")
+
+        elif args.cmd == "set-defaults":
+            payload = {"model": args.model}
+            for field in ("steps", "width", "height", "guidance", "num_images", "seed", "dtype", "quantize"):
+                val = getattr(args, field)
+                if val is not None:
+                    payload[field] = val
+            j = requests.post(f"{S}/defaults/model", json=payload).json()
+            print(f"Updated defaults for {j.get('model')}: {j.get('defaults')}")
 
         elif args.cmd == "run":
             payload = {
@@ -164,6 +206,7 @@ def main():
                 "want_bytes": True,
             }
             if args.model is not None:      payload["model"] = args.model
+            if args.quantize is not None:   payload["quantize"] = None if args.quantize == "auto" else args.quantize
             if args.steps is not None:      payload["steps"] = args.steps
             if args.width is not None:      payload["width"] = args.width
             if args.height is not None:     payload["height"] = args.height
@@ -172,7 +215,11 @@ def main():
             if args.seed is not None:       payload["seed"] = args.seed
             if args.outfile != "out.png":   payload["outfile"] = args.outfile
 
-            j = requests.post(f"{S}/generate", json=payload).json()
+            resp = requests.post(f"{S}/generate", json=payload)
+            if resp.status_code >= 400:
+                print(f"Generation failed: {resp.text}", file=sys.stderr)
+                sys.exit(1)
+            j = resp.json()
             files = j.get("files", [])
             images_b64 = j.get("images_b64", [])
             saved_server = j.get("saved", [])
