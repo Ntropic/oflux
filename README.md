@@ -64,6 +64,7 @@ Optional options for `run`
 ### Model defaults
 
 * Each model keeps its own default settings (steps, size, guidance, dtype, quantization, etc.). These are stored under `model_defaults` in `config.json` so switching models automatically restores the saved defaults.
+* When no model is specified and nothing is currently loaded, the server now falls back to the configured `default_model` (ignoring any stale `loaded` value from previous sessions).
 * Defaults are created the first time you pull or load a model. FLUX.2 models start with a `bnb4` quantization default to fit easier on GPUs.
 * Update a model’s defaults via CLI:
 

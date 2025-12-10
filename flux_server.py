@@ -65,6 +65,13 @@ config = load_json(args.config, {
     "model_defaults": {},
 })
 models_state = load_json(args.models, {"models": [], "loaded": None})
+# The on-disk "loaded" entry can only reflect a previous session; clear it so
+# the configured default (or explicit request) is always used when the server
+# starts fresh.
+if models_state.get("loaded"):
+    print("[Startup] Clearing stale 'loaded' state; no model is loaded yet.")
+    models_state["loaded"] = None
+    save_models()
 
 UNLOAD_TIMEOUT: int = int(config.get("unload_timeout", 300))
 MEMORY_FRACTION: float = float(config.get("memory_fraction", 0.75))
@@ -136,6 +143,27 @@ def _merged_defaults_for(model_id: str) -> dict:
     merged = DEFAULTS.copy()
     merged.update({k: v for k, v in per_model.items() if v is not None})
     return merged
+
+
+def _resolve_model(requested: Optional[str]) -> str:
+    """Pick a model for a request, favoring explicit choice or the configured default."""
+
+    if requested:
+        return requested
+
+    # If a pipeline is already loaded, stick with it unless the caller overrides.
+    if pipe is not None and current_model:
+        return current_model
+
+    # Fresh server start: ignore any stale models_state["loaded"] and rely on config.
+    if DEFAULT_MODEL:
+        return DEFAULT_MODEL
+
+    # As a last resort, fall back to the first tracked model (if any).
+    if models_state.get("models"):
+        return models_state["models"][0]
+
+    raise HTTPException(status_code=400, detail="No model specified and no default_model configured")
 
 
 def _update_model_defaults(model_id: str, updates: dict) -> dict:
@@ -556,7 +584,7 @@ def _try_generate(req, steps, width, height, guidance, num_images, generator):
 @app.post("/generate")
 def generate(req: GenRequest):
     global pipe
-    model_id = req.model or (models_state["loaded"] or DEFAULT_MODEL)
+    model_id = _resolve_model(req.model)
     model_defaults = _merged_defaults_for(model_id)
 
     # Load (and add to list) if needed

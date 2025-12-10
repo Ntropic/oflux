@@ -176,7 +176,11 @@ def main():
             params = {"model": args.model}
             if args.quantize:
                 params["quantize"] = None if args.quantize == "auto" else args.quantize
-            j = requests.post(f"{S}/load", params=params).json()
+            resp = requests.post(f"{S}/load", params=params)
+            if resp.status_code >= 400:
+                print(f"Load failed: {resp.text}", file=sys.stderr)
+                sys.exit(1)
+            j = resp.json()
             print(f"Loaded: {j.get('model')}")
 
         elif args.cmd == "pull":
@@ -211,7 +215,11 @@ def main():
             if args.seed is not None:       payload["seed"] = args.seed
             if args.outfile != "out.png":   payload["outfile"] = args.outfile
 
-            j = requests.post(f"{S}/generate", json=payload).json()
+            resp = requests.post(f"{S}/generate", json=payload)
+            if resp.status_code >= 400:
+                print(f"Generation failed: {resp.text}", file=sys.stderr)
+                sys.exit(1)
+            j = resp.json()
             files = j.get("files", [])
             images_b64 = j.get("images_b64", [])
             saved_server = j.get("saved", [])
