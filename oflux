@@ -158,6 +158,7 @@ USAGE
   oflux serve [--host HOST] [--port PORT] [--config PATH] [--models PATH]
   oflux ls
   oflux defaults
+  oflux set-defaults <model-id> [options]
   oflux unload
   oflux load <model-id>
   oflux pull <model-id>
@@ -176,7 +177,7 @@ RUN OPTIONS
   -o, --outfile PATH        Output file or prefix (if -n>1)
   -O, --outdir DIR          Directory to save images (client side, default .)
   -p, --preview             Preview inline (Kitty terminal only)
-  -q, --quantize MODE       Quantization override (none, bnb4, bnb8)
+  -q, --quantize MODE       Quantization override (auto, none, bnb4, bnb8)
 
 TIPS
   - Start small (512x512, 4–8 steps) then scale up.
@@ -211,6 +212,7 @@ case "${cmd}" in
 
   ls)         python "$CLIENT_BIN" --server "$SERVER_URL" ls ;;
   defaults)   python "$CLIENT_BIN" --server "$SERVER_URL" defaults ;;
+  set-defaults) python "$CLIENT_BIN" --server "$SERVER_URL" set-defaults "$@" ;;
   unload)     python "$CLIENT_BIN" --server "$SERVER_URL" unload ;;
   load)       python "$CLIENT_BIN" --server "$SERVER_URL" load "$@" ;;
   pull)       python "$CLIENT_BIN" --server "$SERVER_URL" pull "$@" ;;

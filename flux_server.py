@@ -47,6 +47,7 @@ parser.add_argument("--models", default="models.json", help="Path to models.json
 parser.add_argument("--host", default="127.0.0.1")
 parser.add_argument("--port", type=int, default=8000)
 args = parser.parse_args()
+CONFIG_PATH = args.config
 
 # ---- config + models ----
 def load_json(path, default):
@@ -61,8 +62,7 @@ config = load_json(args.config, {
     "offload": "sequential",
     "defaults": {"steps": 4, "width": 512, "height": 512, "guidance": 3.5, "num_images": 1, "seed": None, "dtype": "bfloat16"},
     "default_model": "black-forest-labs/FLUX.1-schnell",
-    # Quantization preferences are matched by substring; "none" disables.
-    "quantization": {"flux.2": "bnb4"}
+    "model_defaults": {},
 })
 models_state = load_json(args.models, {"models": [], "loaded": None})
 
@@ -71,13 +71,23 @@ MEMORY_FRACTION: float = float(config.get("memory_fraction", 0.75))
 OFFLOAD_KIND: str = str(config.get("offload", "sequential")).lower()
 DEFAULTS = config.get("defaults", {})
 DEFAULT_MODEL: str = config.get("default_model", "")
-QUANTIZATION_PREFS = {k.lower(): v for k, v in config.get("quantization", {}).items()}
+MODEL_DEFAULTS = config.setdefault("model_defaults", {})
 
 HF_HUB_BASE = os.path.expanduser("~/.cache/huggingface/hub")
 HF_DIFFUSERS_BASE = os.path.expanduser("~/.cache/huggingface/diffusers")
 
 def save_models():
     with open(args.models, "w") as f: json.dump(models_state, f, indent=2)
+
+def save_config():
+    config["model_defaults"] = MODEL_DEFAULTS
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+
+if not isinstance(MODEL_DEFAULTS, dict):
+    MODEL_DEFAULTS = {}
+    config["model_defaults"] = MODEL_DEFAULTS
+    save_config()
 
 # ---- app state ----
 app = FastAPI(title="Flux Server", version="1.2")
@@ -109,6 +119,39 @@ def _candidate_model_ids(model_id: str):
     if not model_id.lower().startswith(prefix):
         base = model_id.split("/")[-1]
         yield prefix + base
+
+def _ensure_model_defaults(model_id: str) -> dict:
+    if model_id not in MODEL_DEFAULTS:
+        defaults = {}
+        # Preserve the previous automatic bnb4 preference for Flux 2 models
+        if "flux.2" in model_id.lower():
+            defaults["quantize"] = "bnb4"
+        MODEL_DEFAULTS[model_id] = defaults
+        save_config()
+    return MODEL_DEFAULTS[model_id]
+
+
+def _merged_defaults_for(model_id: str) -> dict:
+    per_model = _ensure_model_defaults(model_id)
+    merged = DEFAULTS.copy()
+    merged.update({k: v for k, v in per_model.items() if v is not None})
+    return merged
+
+
+def _update_model_defaults(model_id: str, updates: dict) -> dict:
+    md = _ensure_model_defaults(model_id)
+    changed = False
+    for key, val in updates.items():
+        if key == "quantize" and (val or "").lower() == "auto":
+            if "quantize" in md:
+                md.pop("quantize", None)
+                changed = True
+            continue
+        md[key] = val
+        changed = True
+    if changed:
+        save_config()
+    return md
 
 def _unload():
     global pipe, current_model, unload_timer
@@ -161,11 +204,8 @@ def _select_pipeline_cls(model_id: str):
 def _quant_mode(model_id: str, override: Optional[str] = None) -> Optional[str]:
     pref = (override or "").lower() or None
     if pref is None:
-        for key, value in QUANTIZATION_PREFS.items():
-            if key in model_id.lower():
-                pref = (value or "").lower()
-                break
-    if pref in (None, "", "none"):
+        pref = (_ensure_model_defaults(model_id).get("quantize") or "").lower() or None
+    if pref in (None, "", "none", "auto"):
         return None
     return pref
 
@@ -184,31 +224,10 @@ def _quant_config(pref: Optional[str]):
     return None
 
 
-def _quantization_for(model_id: str, quantize: Optional[str] = None, quantize_text: Optional[str] = None, quantize_transformer: Optional[str] = None):
-    """Return a BitsAndBytesConfig or map for selected components."""
-    base_pref = _quant_mode(model_id, override=quantize)
-    text_pref = _quant_mode(model_id, override=quantize_text)
-    transformer_pref = _quant_mode(model_id, override=quantize_transformer)
-
-    if text_pref is None:
-        text_pref = base_pref
-    if transformer_pref is None:
-        transformer_pref = base_pref
-
-    configs = {}
-    text_cfg = _quant_config(text_pref)
-    transformer_cfg = _quant_config(transformer_pref)
-    if transformer_cfg is not None:
-        configs["transformer"] = transformer_cfg
-    if text_cfg is not None:
-        configs["text_encoder"] = text_cfg
-        configs["text_encoder_2"] = text_cfg
-
-    if not configs:
-        return None
-    if len(configs) == 1 and "transformer" in configs:
-        return configs["transformer"]
-    return configs
+def _quantization_for(model_id: str, quantize: Optional[str] = None):
+    """Return a BitsAndBytesConfig based on overrides or stored defaults."""
+    pref = _quant_mode(model_id, override=quantize)
+    return _quant_config(pref)
 
 def _env_hf_token() -> Optional[str]:
     for k in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
@@ -285,6 +304,7 @@ def _pull_model(model_id: str) -> str:
             continue
 
         # success
+        _ensure_model_defaults(candidate)
         if candidate not in models_state["models"]:
             models_state["models"].append(candidate)
             save_models()
@@ -294,24 +314,20 @@ def _pull_model(model_id: str) -> str:
         raise last_error
     raise RuntimeError(f"Failed to pull {model_id}")
 
-def _load(model_id: str, quantize: Optional[str] = None, quantize_text: Optional[str] = None, quantize_transformer: Optional[str] = None):
+def _load(model_id: str, quantize: Optional[str] = None):
     """Load a model; on success add to models.json."""
     global pipe, current_model
     _unload()
     print(f"[Loading] Loading model: {model_id}")
 
-    torch_dtype = _choose_dtype(DEFAULTS.get("dtype", "bfloat16"))
-
     last_error = None
     resolved_id = None
     for candidate in _candidate_model_ids(model_id):
+        _ensure_model_defaults(candidate)
+        defaults = _merged_defaults_for(candidate)
+        torch_dtype = _choose_dtype(defaults.get("dtype", DEFAULTS.get("dtype", "bfloat16")))
         pipeline_cls = _select_pipeline_cls(candidate)
-        quant_config = _quantization_for(
-            candidate,
-            quantize=quantize,
-            quantize_text=quantize_text,
-            quantize_transformer=quantize_transformer,
-        )
+        quant_config = _quantization_for(candidate, quantize=quantize)
         extra_kwargs = {}
         if quant_config is not None:
             extra_kwargs["quantization_config"] = quant_config
@@ -381,8 +397,6 @@ class GenRequest(BaseModel):
     prompt: str
     model: Optional[str] = None
     quantize: Optional[str] = None
-    quantize_text: Optional[str] = None
-    quantize_transformer: Optional[str] = None
     steps: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
@@ -399,6 +413,18 @@ class GenRequest(BaseModel):
     # Should the server return images as base64 so the client can save locally?
     want_bytes: Optional[bool] = True
 
+
+class ModelDefaultsRequest(BaseModel):
+    model: str
+    steps: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    guidance: Optional[float] = None
+    num_images: Optional[int] = None
+    seed: Optional[int] = None
+    dtype: Optional[str] = None
+    quantize: Optional[str] = None
+
 # ---- endpoints ----
 @app.get("/health")
 def health():
@@ -412,8 +438,25 @@ def get_defaults():
         "offload": OFFLOAD_KIND,
         "defaults": DEFAULTS,
         "default_model": DEFAULT_MODEL,
-        "quantization": QUANTIZATION_PREFS,
+        "model_defaults": MODEL_DEFAULTS,
     }
+
+
+@app.get("/defaults/model")
+def get_model_defaults(model: str = Query(..., description="Model id to inspect defaults")):
+    return {
+        "model": model,
+        "defaults": _merged_defaults_for(model),
+        "stored": _ensure_model_defaults(model),
+    }
+
+
+@app.post("/defaults/model")
+def set_model_defaults(req: ModelDefaultsRequest):
+    payload = req.dict(exclude_none=True)
+    model_id = payload.pop("model")
+    md = _update_model_defaults(model_id, payload)
+    return {"status": "updated", "model": model_id, "defaults": md}
 
 @app.get("/models")
 def list_models():
@@ -423,24 +466,15 @@ def list_models():
 @app.post("/load")
 def load_model(
     model: str = Query(..., description="Repo id, e.g. black-forest-labs/FLUX.1-schnell"),
-    quantize: Optional[str] = Query(None, description="Quantization mode: none|bnb4|bnb8 (applies to both unless overridden)"),
-    quantize_text: Optional[str] = Query(None, description="Quantization for text encoder: none|bnb4|bnb8"),
-    quantize_transformer: Optional[str] = Query(None, description="Quantization for transformer: none|bnb4|bnb8"),
+    quantize: Optional[str] = Query(None, description="Quantization mode: auto|none|bnb4|bnb8"),
 ):
     global pipe
     try:
-        pipe = _load(
-            model,
-            quantize=quantize,
-            quantize_text=quantize_text,
-            quantize_transformer=quantize_transformer,
-        )
+        pipe = _load(model, quantize=quantize)
         return {
             "status": "loaded",
             "model": current_model,
-            "quantize": quantize or "auto",
-            "quantize_text": quantize_text or (quantize or "auto"),
-            "quantize_transformer": quantize_transformer or (quantize or "auto"),
+            "quantize": quantize or (_ensure_model_defaults(model).get("quantize") or "auto"),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load {model}: {e}")
@@ -469,13 +503,13 @@ def delete_model(model: str = Query(..., description="Repo id to remove from lis
         save_models()
     return {"status": "removed", "model": model, "paths": removed_paths}
 
-def _clamp_and_seed(req):
-    steps = int(req.steps or DEFAULTS.get("steps", 4))
-    width = int(req.width or DEFAULTS.get("width", 512))
-    height = int(req.height or DEFAULTS.get("height", 512))
-    guidance = float(req.guidance or DEFAULTS.get("guidance", 3.5))
-    num_images = int(req.num_images or DEFAULTS.get("num_images", 1))
-    seed = req.seed if req.seed is not None else DEFAULTS.get("seed", None)
+def _clamp_and_seed(req, defaults: dict):
+    steps = int(req.steps or defaults.get("steps", 4))
+    width = int(req.width or defaults.get("width", 512))
+    height = int(req.height or defaults.get("height", 512))
+    guidance = float(req.guidance or defaults.get("guidance", 3.5))
+    num_images = int(req.num_images or defaults.get("num_images", 1))
+    seed = req.seed if req.seed is not None else defaults.get("seed", None)
 
     width = max(64, min(width, 1024))
     height = max(64, min(height, 1024))
@@ -523,20 +557,16 @@ def _try_generate(req, steps, width, height, guidance, num_images, generator):
 def generate(req: GenRequest):
     global pipe
     model_id = req.model or (models_state["loaded"] or DEFAULT_MODEL)
+    model_defaults = _merged_defaults_for(model_id)
 
     # Load (and add to list) if needed
     if current_model != model_id or pipe is None:
         try:
-            pipe = _load(
-                model_id,
-                quantize=req.quantize,
-                quantize_text=req.quantize_text,
-                quantize_transformer=req.quantize_transformer,
-            )
+            pipe = _load(model_id, quantize=req.quantize)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to load {model_id}: {e}")
 
-    steps, width, height, guidance, num_images, generator = _clamp_and_seed(req)
+    steps, width, height, guidance, num_images, generator = _clamp_and_seed(req, model_defaults)
     print(f"[Generating] [{current_model}] {width}x{height} steps={steps} gs={guidance} n={num_images} seed={req.seed}")
 
     # One-shot OOM retry: halve size & steps, force n=1

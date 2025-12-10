@@ -59,14 +59,23 @@ Optional options for `run`
 | `-o, --outfile PATH`  | Output file or prefix (if `-n>1`). If missing will auto-generate a name from prompt |
 | `-O, --outdir DIR`    | Directory to save images (client side, default `.`) |
 | `-p, --preview`       | Preview inline (Kitty terminal only) |
-| `-q, --quantize MODE` | Quantize both text + transformer (`none`, `bnb4`, `bnb8`) |
-| `--quantize-text MODE` | Quantize just the text encoder (`none`, `bnb4`, `bnb8`) |
-| `--quantize-transformer MODE` | Quantize just the transformer/UNet (`none`, `bnb4`, `bnb8`) |
+| `-q, --quantize MODE` | Per-call quantization override (`auto`, `none`, `bnb4`, `bnb8`) |
+
+### Model defaults
+
+* Each model keeps its own default settings (steps, size, guidance, dtype, quantization, etc.). These are stored under `model_defaults` in `config.json` so switching models automatically restores the saved defaults.
+* Defaults are created the first time you pull or load a model. FLUX.2 models start with a `bnb4` quantization default to fit easier on GPUs.
+* Update a model’s defaults via CLI:
+
+```bash
+oflux set-defaults black-forest-labs/FLUX.2-dev --quantize none --steps 6 --width 1024 --height 1024
+```
+Use `--quantize none` to disable quantization for that model or `--quantize auto` to clear an override.
 
 ### Quantization
 
-* The server chooses quantization based on `config.json`. By default, any model containing `flux.2` is loaded in 4-bit (bitsandbytes) to fit on more GPUs. Override per run with `-q`/`--quantize` or set `"quantization"` in `config.json` (e.g., `{ "flux.2": "bnb4" }`).
-* You can quantize components separately. Use `--quantize-text` (text encoder) and/or `--quantize-transformer` (UNet/transformer). If only `-q/--quantize` is provided it applies to both components.
+* Quantization defaults live per model (see above). Per-call overrides via `-q/--quantize` take precedence for that invocation only.
+* Allowed values: `bnb4`, `bnb8`, `none`, or `auto` (auto = use saved defaults). Use `none` to load the model without quantization even if a default exists.
 * Requires the `bitsandbytes` dependency (installed automatically on first run).
 
 
@@ -74,6 +83,7 @@ Optional options for `run`
 
 ```bash
 oflux defaults
+oflux set-defaults <model-id>
 oflux unload
 oflux load <model-id>
 oflux pull <model-id>
