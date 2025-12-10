@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 import uvicorn
 
-from diffusers import FluxPipeline, StableDiffusionPipeline
+from diffusers import FluxPipeline, Flux2Pipeline, StableDiffusionPipeline
 import base64
 from io import BytesIO
 import re
@@ -129,6 +129,17 @@ def _apply_offload(p):
         p.enable_model_cpu_offload()
     # else "none": no offload
 
+def _select_pipeline_cls(model_id: str):
+    mid = model_id.lower()
+    # FLUX.2
+    if "flux.2" in mid and Flux2Pipeline is not None:
+        return Flux2Pipeline
+    # FLUX.1 and other Flux variants
+    if "flux.1" in mid or "flux" in mid:
+        return FluxPipeline
+    # Fallback - Stable Diffusion
+    return StableDiffusionPipeline
+
 def _load(model_id: str):
     """Load a model; on success add to models.json."""
     global pipe, current_model
@@ -136,25 +147,28 @@ def _load(model_id: str):
     print(f"[Loading] Loading model: {model_id}")
 
     torch_dtype = _choose_dtype(DEFAULTS.get("dtype", "bfloat16"))
+    pipeline_cls = _select_pipeline_cls(model_id)
 
-    pipe = FluxPipeline.from_pretrained(
-        model_id,
-        torch_dtype=torch_dtype,
-        use_safetensors=True
-    )
-
-    # ✅ match what worked in IPython
-    pipe.enable_attention_slicing()
-    pipe.enable_sequential_cpu_offload()
+    try:
+        pipe = pipeline_cls.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            use_safetensors=True,
+        )
+        _apply_offload(pipe)
+    except Exception as e:
+        print(f"[ERROR] Failed to load {model_id}")
+        import traceback; traceback.print_exc()
+        raise
 
     current_model = model_id
     models_state["loaded"] = model_id
-
     if model_id not in models_state["models"]:
         models_state["models"].append(model_id)
     save_models()
-
     return pipe
+
+
 
 class GenRequest(BaseModel):
     prompt: str
