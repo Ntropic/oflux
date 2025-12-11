@@ -65,6 +65,13 @@ config = load_json(args.config, {
     "model_defaults": {},
 })
 models_state = load_json(args.models, {"models": [], "loaded": None})
+# The on-disk "loaded" entry can only reflect a previous session; clear it so
+# the configured default (or explicit request) is always used when the server
+# starts fresh.
+if models_state.get("loaded"):
+    print("[Startup] Clearing stale 'loaded' state; no model is loaded yet.")
+    models_state["loaded"] = None
+    save_models()
 
 UNLOAD_TIMEOUT: int = int(config.get("unload_timeout", 300))
 MEMORY_FRACTION: float = float(config.get("memory_fraction", 0.75))
@@ -84,27 +91,10 @@ def save_config():
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
-
-def _initialize_state():
-    """Normalize persisted state on import/startup before serving."""
-    global MODEL_DEFAULTS
-
-    # The on-disk "loaded" entry can only reflect a previous session; clear it
-    # so the configured default (or explicit request) is always used when the
-    # server starts fresh.
-    if models_state.get("loaded"):
-        print("[Startup] Clearing stale 'loaded' state; no model is loaded yet.")
-        models_state["loaded"] = None
-        save_models()
-
-    if not isinstance(MODEL_DEFAULTS, dict):
-        # Recover gracefully if the config was manually corrupted.
-        MODEL_DEFAULTS = {}
-        config["model_defaults"] = MODEL_DEFAULTS
-        save_config()
-
-
-_initialize_state()
+if not isinstance(MODEL_DEFAULTS, dict):
+    MODEL_DEFAULTS = {}
+    config["model_defaults"] = MODEL_DEFAULTS
+    save_config()
 
 # ---- app state ----
 app = FastAPI(title="Flux Server", version="1.2")
